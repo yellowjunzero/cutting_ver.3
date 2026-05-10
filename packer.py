@@ -78,7 +78,8 @@ class NodeHeap:
 class PlacementCandidate:
     dead_volume: float        # 1순위: 당장 발생하는 데드 스페이스 (절대악)
     linear_waste: float       # 2순위: 축별 장기 예상 쓰레기 합산
-    neg_max_offcut: float     # 3순위: 단일 최대 잔재 크기 (음수)
+    rotation_penalty: int     # ✨ 3순위: 동점이면 쓸데없이 돌리지 말고 '자르던 대로(원래 방향)' 유지!
+    neg_max_offcut: float     # 4순위: 단일 최대 잔재 크기 (음수)
     node_id: str = field(compare=False)
     node: Node = field(compare=False)
     part: Part = field(compare=False)
@@ -161,6 +162,10 @@ def _axis_waste(total: float, pdim: float, kerf: float) -> float:
 # Best-Fit 후보 선택 (Dead Volume + Linear Waste)
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# Best-Fit 후보 선택 (Dead Volume + Linear Waste + Rotation Penalty)
+# ─────────────────────────────────────────────
+
 def _find_best_candidate(
     node: Node,
     remaining_parts: Dict[str, int],
@@ -178,13 +183,20 @@ def _find_best_candidate(
             if not orientation.fits_in(node.dims):
                 continue
 
-            # 1. 장기적인 선형 쓰레기 계산
+            # 1. 선형 쓰레기 시뮬레이션
             lw_x = _axis_waste(node.dims.l, orientation.l, kerf)
             lw_y = _axis_waste(node.dims.w, orientation.w, kerf)
             lw_z = _axis_waste(node.dims.t, orientation.t, kerf)
             total_linear_waste = lw_x + lw_y + lw_z
 
-            # 2. 6가지 절단 순서 시뮬레이션
+            # ✨ 2. 회전 페널티 계산 (일관성 유지의 핵심)
+            if orientation.l == part.dims.l and orientation.w == part.dims.w and orientation.t == part.dims.t:
+                rot_penalty = 0  # 완벽히 일치 (회전 안 함 = 한칼에 계속 자름)
+            elif orientation.t == part.dims.t:
+                rot_penalty = 1  # 2D 평면 회전 (두께는 유지)
+            else:
+                rot_penalty = 2  # 3D 입체 회전 (두께가 바뀜, 작업 번거로움)
+
             for order in _ALL_ORDERS:
                 offcuts = _simulate_cut_order(node, orientation, order, kerf)
                 if offcuts is None:
@@ -198,13 +210,13 @@ def _find_best_candidate(
                     if vol > max_offcut:
                         max_offcut = vol
                     
-                    # 3. 당장 발생하는 데드 스페이스 감지
                     if not _can_fit_any(offcut, remaining_parts, parts_by_id, part_id):
                         dead_vol += vol
 
                 candidate = PlacementCandidate(
                     dead_volume=dead_vol,
                     linear_waste=total_linear_waste,
+                    rotation_penalty=rot_penalty,  # ✨ 페널티 지능 적용!
                     neg_max_offcut=-max_offcut,
                     node_id=node.node_id,
                     node=node,
