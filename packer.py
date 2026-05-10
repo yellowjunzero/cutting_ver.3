@@ -76,12 +76,11 @@ class NodeHeap:
 
 @dataclass(order=True)
 class PlacementCandidate:
-    neg_exact_fits: int       # ✨ 1순위: 노드와 딱 맞는 축의 개수 (완벽한 기둥/띠를 형성하여 난잡한 절단 방지)
-    part_idx: int             # ✨ 2순위: 부품 순서 (A 부품을 다 끝내기 전에 B 부품을 섞는 '테트리스' 방지)
-    neg_actual_fit: int       # 3순위: 노드에 들어갈 수 있는 실제 필요 개수
-    linear_waste: float       # 4순위: 선형 쓰레기 최소화
-    rotation_penalty: int     # 5순위: 회전 일관성 유지
-    neg_max_offcut: float     # 6순위: 단일 최대 잔재 크기
+    part_idx: int             # ✨ 1순위: 부품 순서 강제 (다른 부품 끼어들기 절대 금지)
+    neg_estimated_count: int  # ✨ 2순위: 최대 입주 가능 수량 (통일된 기둥과 띠 형성의 핵심)
+    linear_waste: float       # 3순위: 선형 쓰레기 최소화
+    rotation_penalty: int     # 4순위: 회전 일관성 유지 (돌리지 마!)
+    neg_max_offcut: float     # 5순위: 단일 최대 잔재 크기 (음수)
     node_id: str = field(compare=False)
     node: Node = field(compare=False)
     part: Part = field(compare=False)
@@ -161,7 +160,7 @@ def _best_cut_order(
 
 
 # ─────────────────────────────────────────────
-# Best-Fit 후보 선택 (현장 맞춤형)
+# Best-Fit 후보 선택 (현장 맞춤형 그룹핑)
 # ─────────────────────────────────────────────
 
 def _fit_count(total: float, pdim: float, kerf: float) -> int:
@@ -184,7 +183,6 @@ def _find_best_candidate(
 ) -> Optional[PlacementCandidate]:
     best: Optional[PlacementCandidate] = None
     
-    # 부품 우선순위를 유지하기 위해 키 목록 추출
     part_keys = list(remaining_parts.keys())
 
     for part_id, qty in remaining_parts.items():
@@ -197,22 +195,19 @@ def _find_best_candidate(
             if not orientation.fits_in(node.dims):
                 continue
 
+            # ✨ 1. 예상 최대 수량 (Grid 형성의 핵심 잠재력)
             cx = _fit_count(node.dims.l, orientation.l, kerf)
             cy = _fit_count(node.dims.w, orientation.w, kerf)
             cz = _fit_count(node.dims.t, orientation.t, kerf)
-            actual_fit = min(cx * cy * cz, qty)
+            est_count = cx * cy * cz  
 
-            # ✨ 현재 노드의 크기와 딱 맞아떨어지는지(기둥/띠 형성) 검사
-            exact_fits = 0
-            if abs(node.dims.l - orientation.l) <= _EPSILON: exact_fits += 1
-            if abs(node.dims.w - orientation.w) <= _EPSILON: exact_fits += 1
-            if abs(node.dims.t - orientation.t) <= _EPSILON: exact_fits += 1
-
+            # 2. 선형 쓰레기 시뮬레이션
             lw_x = _axis_waste(node.dims.l, orientation.l, kerf)
             lw_y = _axis_waste(node.dims.w, orientation.w, kerf)
             lw_z = _axis_waste(node.dims.t, orientation.t, kerf)
             total_linear_waste = lw_x + lw_y + lw_z
 
+            # 3. 회전 페널티 계산
             if orientation.l == part.dims.l and orientation.w == part.dims.w and orientation.t == part.dims.t:
                 rot_penalty = 0
             elif orientation.t == part.dims.t:
@@ -227,12 +222,11 @@ def _find_best_candidate(
             best_order, max_offcut = order_result
 
             candidate = PlacementCandidate(
-                neg_exact_fits=-exact_fits,     # 1순위: 딱 맞게 떨어지는 곳 우선!
-                part_idx=p_idx,                 # 2순위: 다른 부품 섞지 말고 하던 거 먼저!
-                neg_actual_fit=-actual_fit,
-                linear_waste=total_linear_waste,
-                rotation_penalty=rot_penalty,
-                neg_max_offcut=-max_offcut,
+                part_idx=p_idx,                   # 1순위: 다른 부품 섞지 마!
+                neg_estimated_count=-est_count,   # 2순위: 무조건 크게 덩어리 묶어!
+                linear_waste=total_linear_waste,  # 3순위: 쓰레기 최소화
+                rotation_penalty=rot_penalty,     # 4순위: 돌리지 마!
+                neg_max_offcut=-max_offcut,       # 5순위: 잔재 크게 남기기
                 node_id=node.node_id,
                 node=node,
                 part=part,
