@@ -177,11 +177,12 @@ function StockOutline({ summary, zOffset }) {
 }
 
 // ─────────────────────────────────────────────
-// ✨ 3D 컴포넌트: 투명 잔재 (Offcuts) 렌더러
+// ✨ 3D 컴포넌트: 투명 잔재 (Offcuts) 렌더러 (업그레이드 버전)
 // ─────────────────────────────────────────────
 function OffcutBox({ offcut, zOffset }) {
   const { l, w, t } = offcut.dims;
   const { x, y, z } = offcut.origin;
+  const [hovered, setHovered] = useState(false);
 
   // 톱날(Kerf) 두께 수준의 너무 얇은 잔재는 시각적 방해를 막기 위해 숨김 처리
   if (l < 6 || w < 6 || t < 6) return null;
@@ -191,19 +192,51 @@ function OffcutBox({ offcut, zOffset }) {
   const cz = (z + t / 2) * SCALE + zOffset;
 
   return (
-    <mesh position={[cx, cy, cz]}>
-      <boxGeometry args={[l * SCALE, w * SCALE, t * SCALE]} />
-      {/* 반투명 유리 상자 재질 */}
-      <meshStandardMaterial color="#64748b" transparent opacity={0.15} roughness={0.9} depthWrite={false} />
-      {/* 잔재 윤곽선 (옅은 회색) */}
-      <lineSegments>
-        <edgesGeometry args={[new THREE.BoxGeometry(l * SCALE, w * SCALE, t * SCALE)]} />
-        <lineBasicMaterial color="#94a3b8" transparent opacity={0.3} />
-      </lineSegments>
-    </mesh>
+    <group>
+      <mesh 
+        position={[cx, cy, cz]}
+        onPointerOver={(e) => { e.stopPropagation(); setHovered(true); }}
+        onPointerOut={() => setHovered(false)}
+      >
+        <boxGeometry args={[l * SCALE, w * SCALE, t * SCALE]} />
+        {/* 고급스러운 홀로그램/유리 재질 */}
+        <meshPhysicalMaterial 
+          color="#38bdf8" 
+          transparent 
+          opacity={hovered ? 0.3 : 0.08} 
+          roughness={0.1} 
+          metalness={0.1} 
+          clearcoat={1} 
+          depthWrite={false} 
+        />
+        {/* 눈에 확 띄는 파란색 엣지 */}
+        <lineSegments>
+          <edgesGeometry args={[new THREE.BoxGeometry(l * SCALE, w * SCALE, t * SCALE)]} />
+          <lineBasicMaterial color="#7dd3fc" transparent opacity={hovered ? 0.8 : 0.25} />
+        </lineSegments>
+      </mesh>
+
+      {/* 잔재 호버 툴팁 */}
+      {hovered && (
+        <Html position={[cx, cy + w * SCALE * 0.5 + 0.05, cz]} center zIndexRange={[100, 0]}>
+          <div style={{
+            background: "rgba(15,23,42,0.9)",
+            border: "1px solid #38bdf8",
+            borderRadius: 6, padding: "6px 10px",
+            color: "#e0f2fe", fontSize: 11, fontFamily: "'DM Mono', monospace",
+            whiteSpace: "nowrap", pointerEvents: "none",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+          }}>
+            <div style={{ fontWeight: 700, color: "#38bdf8", marginBottom: 3 }}>
+              ✂ 잔재 (Offcut)
+            </div>
+            <div>{l.toFixed(1)} × {w.toFixed(1)} × {t.toFixed(1)} mm</div>
+          </div>
+        </Html>
+      )}
+    </group>
   );
 }
-
 // ─────────────────────────────────────────────
 // 카메라 자동 프레이밍
 // ─────────────────────────────────────────────
