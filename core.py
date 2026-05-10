@@ -106,9 +106,10 @@ class Stock:
     @property
     def usable_dims(self) -> Dims:
         """[C3] 트리밍 적용 후 실제 사용 가능 치수"""
-        ul = self.dims.l - 2 * self.trimming.x
-        uw = self.dims.w - 2 * self.trimming.y
-        ut = self.dims.t - 2 * self.trimming.z
+        # 기존: ul = self.dims.l - 2 * self.trimming.x (아래처럼 2 * 삭제)
+        ul = self.dims.l - self.trimming.x
+        uw = self.dims.w - self.trimming.y
+        ut = self.dims.t - self.trimming.z
         if ul <= 0 or uw <= 0 or ut <= 0:
             raise ValueError(
                 f"Stock '{self.id}'의 트리밍이 너무 커서 사용 가능 치수가 0 이하입니다."
