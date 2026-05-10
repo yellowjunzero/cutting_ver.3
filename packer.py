@@ -1,5 +1,5 @@
 """
-packer.py — 탐색 & 배치 엔진 (강력한 예외 처리 및 GRASP 최적화)
+packer.py — 탐색 & 배치 엔진 (Corner-First & 최대 단일 잔재 보존 알고리즘 - 오타 수정 완료)
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class NodeHeap:
         self._removed: set = set()
 
     def push(self, node: Node):
-        # 구석 몰아넣기 (Corner-First Heuristic)
+        # ✨ 핵심 개선 1: 구석 몰아넣기 (Corner-First Heuristic)
         heapq.heappush(self._heap, (node.origin.x, node.origin.y, node.origin.z, node.volume, node.node_id, node))
 
     def pop(self) -> Optional[Node]:
@@ -61,7 +61,7 @@ _ALL_AXES = [CutAxis.X, CutAxis.Y, CutAxis.Z]
 _ALL_ORDERS = list(permutations(_ALL_AXES))
 
 def _get_lwt(dims_obj) -> Tuple[float, float, float]:
-    """✨ 튜플과 Dims 객체를 모두 지원하는 안전한 치수 추출 함수 (에러 완벽 차단)"""
+    """튜플과 Dims 객체를 모두 지원하는 안전한 치수 추출"""
     l = dims_obj.l if hasattr(dims_obj, 'l') else dims_obj[0]
     w = dims_obj.w if hasattr(dims_obj, 'w') else dims_obj[1]
     t = dims_obj.t if hasattr(dims_obj, 't') else dims_obj[2]
@@ -149,7 +149,6 @@ def _find_best_candidate(
             n_l, n_w, n_t = _get_lwt(node.dims)
             p_l, p_w, p_t = _get_lwt(orientation)
             
-            # fits_in 안전 처리 (메서드가 없어도 통과되도록)
             if hasattr(orientation, 'fits_in'):
                 if not orientation.fits_in(node.dims): continue
             else:
@@ -280,7 +279,7 @@ def pack_parts(
     settings: EngineSettings, stocks: List[Stock], parts: List[Part],
 ) -> PackResult:
     """
-    ✨ 5초 최적화 엔진 (Corner-First + 최대 단일 잔재 평가)
+    ✨ 5초 최적화 엔진 (Corner-First + 최대 단일 잔재 평가 + 에러 수정 완료)
     """
     start_total = time.perf_counter()
     TIME_LIMIT = 5.0  
@@ -289,22 +288,26 @@ def pack_parts(
     best_unplaced = float('inf')
     best_largest_offcut = -1.0
     
+    # 기본 모드
     best_result = _pack_parts_single(settings, stocks, parts)
     best_unplaced = sum(best_result.unplaced.values())
     best_largest_offcut = max((n.volume for n in best_result.free_nodes), default=0.0)
 
+    # GRASP 다중 패스
     while True:
         if time.perf_counter() - start_total > TIME_LIMIT:
             break
             
         test_parts = copy.deepcopy(parts)
         strategy = random.random()
+        
+        # ✨ 버그 수정 완료: p.l -> p.dims.l 로 접근하도록 모두 교체!
         if strategy < 0.2:
-            test_parts.sort(key=lambda p: -(p.l * p.w * p.t))
+            test_parts.sort(key=lambda p: -(p.dims.l * p.dims.w * p.dims.t))
         elif strategy < 0.4:
-            test_parts.sort(key=lambda p: -max(p.l, p.w))
+            test_parts.sort(key=lambda p: -max(p.dims.l, p.dims.w))
         elif strategy < 0.6:
-            test_parts.sort(key=lambda p: -min(p.l, p.w))
+            test_parts.sort(key=lambda p: -min(p.dims.l, p.dims.w))
         else:
             random.shuffle(test_parts)
             
@@ -314,6 +317,7 @@ def pack_parts(
         unplaced = sum(result.unplaced.values())
         largest_offcut = max((n.volume for n in result.free_nodes), default=0.0)
         
+        # 미배치 수가 적거나, 같을 경우 단일 잔재가 더 크게 남는 것을 1등으로 선택
         if unplaced < best_unplaced or (unplaced == best_unplaced and largest_offcut > best_largest_offcut):
             best_unplaced = unplaced
             best_largest_offcut = largest_offcut
