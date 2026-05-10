@@ -61,15 +61,15 @@ class NodeHeap:
 
 
 # ─────────────────────────────────────────────
-# 배치 후보 (정렬 가능)
+# 배치 후보 (수율과 작업성의 황금 밸런스)
 # ─────────────────────────────────────────────
 
 @dataclass(order=True)
 class PlacementCandidate:
-    part_idx: int             # ✨ 1순위: 부품 순서 강제 (체스판 섞임 절대 금지)
-    neg_estimated_count: int  # ✨ 2순위: 최대 입주 가능 수량
-    linear_waste: float       # 3순위: 선형 쓰레기 최소화
-    rotation_penalty: int     # 4순위: 회전 일관성 유지
+    neg_estimated_count: int  # ✨ 1순위: 이 공간에 최대한 많이 뭉칠 수 있는 부품을 찾아라! (자연스러운 블록 형성)
+    linear_waste: float       # ✨ 2순위: 톱날 로스나 틈새 쓰레기를 최소화하라!
+    part_idx: int             # ✨ 3순위: 앞의 조건이 비슷하다면, 이왕이면 원래 자르던 부품을 이어서 잘라라! (난잡한 섞임 방지)
+    rotation_penalty: int     # 4순위: 돌리지 마!
     neg_max_offcut: float     # 5순위: 단일 최대 잔재 크기
     node_id: str = field(compare=False)
     node: Node = field(compare=False)
@@ -218,11 +218,11 @@ def _find_best_candidate(
             best_order, max_offcut = order_result
 
             candidate = PlacementCandidate(
-                part_idx=p_idx,                   
-                neg_estimated_count=-est_count,   
-                linear_waste=total_linear_waste,  
-                rotation_penalty=rot_penalty,     
-                neg_max_offcut=-max_offcut,       
+                neg_estimated_count=-est_count,   # 1순위
+                linear_waste=total_linear_waste,  # 2순위
+                part_idx=p_idx,                   # 3순위
+                rotation_penalty=rot_penalty,     # 4순위
+                neg_max_offcut=-max_offcut,       # 5순위
                 node_id=node.node_id,
                 node=node,
                 part=part,
