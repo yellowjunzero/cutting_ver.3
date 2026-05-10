@@ -24,12 +24,16 @@ class NodeHeap:
         self._removed: set = set()
 
     def push(self, node: Node):
-        # ✨ 핵심 개선 1: 구석 몰아넣기 (Corner-First Heuristic)
-        heapq.heappush(self._heap, (node.origin.x, node.origin.y, node.origin.z, node.volume, node.node_id, node))
+        # 정렬 키: (-depth, -volume)
+        # -depth: 절단 깊이가 깊을수록(자투리일수록) 먼저 꺼냄 → 자투리 우선 소진
+        # -volume: 같은 깊이면 큰 공간 우선 → Best-Fit 효율 보존
+        # 두께(Z축) 보존: _offcut_score_for_order의 rem_t 가중치가
+        # 좌표 기반 외부 강제 없이 순수하게 Z절단 순서를 결정하도록 위임
+        heapq.heappush(self._heap, (-node.depth, -node.volume, node.node_id, node))
 
     def pop(self) -> Optional[Node]:
         while self._heap:
-            x, y, z, vol, node_id, node = heapq.heappop(self._heap)
+            neg_depth, neg_vol, node_id, node = heapq.heappop(self._heap)
             if node_id in self._removed:
                 continue
             if node.state != NodeState.FREE:
@@ -235,6 +239,50 @@ def _pack_parts_single(
     def _open_next_stock() -> bool:
         nonlocal stock_index, stocks_used
         if stock_index >= len(stock_pool): return False
+
+        # ── Best-Fit Bin 선택 ──────────────────────────────────────────
+        # 미배치 부품들의 모든 허용 방향을 수집하고,
+        # 그 중 가장 큰 부품(최대 footprint 기준)이 들어갈 수 있는
+        # 가장 작은(usable_volume 최소) 원장을 우선 선택한다.
+        #
+        # 폴백: 조건을 만족하는 원장이 없으면 pool 순서대로 꺼낸다.
+        remaining_dims: List[Dims] = []
+        for pid, qty in remaining.items():
+            if qty > 0:
+                for orient in parts_by_id[pid].allowed_orientations():
+                    remaining_dims.append(orient)
+
+        best_local_idx: Optional[int] = None
+        best_local_vol: float = float('inf')
+
+        if remaining_dims:
+            # 가장 큰 부품 기준으로 내림차순 정렬 (footprint = l*w 최대)
+            sorted_dims = sorted(remaining_dims, key=lambda d: d.l * d.w * d.t, reverse=True)
+
+            for candidate_dims in sorted_dims:
+                # 이 치수가 들어갈 수 있는 원장 중 usable_volume이 최소인 것 찾기
+                found_for_this_dim = False
+                for i in range(stock_index, len(stock_pool)):
+                    s = stock_pool[i]
+                    ud = s.usable_dims  # trimming 반영
+                    if (candidate_dims.l <= ud.l + _EPSILON and
+                        candidate_dims.w <= ud.w + _EPSILON and
+                        candidate_dims.t <= ud.t + _EPSILON):
+                        uv = ud.volume
+                        if uv < best_local_vol:
+                            best_local_vol = uv
+                            best_local_idx = i
+                        found_for_this_dim = True
+                # 가장 큰 부품이 들어가는 원장을 찾았으면 확정
+                if found_for_this_dim and best_local_idx is not None:
+                    break
+
+        # 선택된 원장이 있으면 현재 위치와 swap 후 꺼냄
+        if best_local_idx is not None and best_local_idx != stock_index:
+            stock_pool[stock_index], stock_pool[best_local_idx] = (
+                stock_pool[best_local_idx], stock_pool[stock_index]
+            )
+
         stock = stock_pool[stock_index]
         stock_index += 1
         stocks_used += 1
@@ -265,7 +313,10 @@ def _pack_parts_single(
         for free_node in new_free:
             heap.push(free_node)
 
-    free_nodes = [item[-1] for item in heap._heap if item[-1].node_id not in heap._removed and item[-1].state == NodeState.FREE]
+    # 튜플 구조: (-depth, -volume, node_id, node) → node는 인덱스 3
+    free_nodes = [item[3] for item in heap._heap
+                  if item[3].node_id not in heap._removed
+                  and item[3].state == NodeState.FREE]
     
     return PackResult(
         occupied_nodes=occupied_nodes,
@@ -279,19 +330,23 @@ def pack_parts(
     settings: EngineSettings, stocks: List[Stock], parts: List[Part],
 ) -> PackResult:
     """
-    ✨ 5초 최적화 엔진 (Corner-First + 최대 단일 잔재 평가 + 에러 수정 완료)
+    5초 GRASP 최적화 엔진
+      - NodeHeap: (-depth, -volume) 정렬 → 자투리 우선 소진, Z축 두께 보존
+      - GRASP 평가: 1순위 미배치 최소, 2순위 총 선형 로스 최소
+      - Best-Fit Bin: 미배치 부품 중 최대 부품이 들어가는 최소 원장 우선 선택
     """
     start_total = time.perf_counter()
     TIME_LIMIT = 5.0  
     
     best_result = None
     best_unplaced = float('inf')
-    best_largest_offcut = -1.0
+    best_linear_waste = float('inf')  # 2순위: 선형 로스 합산이 작을수록 좋음
     
     # 기본 모드
     best_result = _pack_parts_single(settings, stocks, parts)
     best_unplaced = sum(best_result.unplaced.values())
-    best_largest_offcut = max((n.volume for n in best_result.free_nodes), default=0.0)
+    # 총 선형 로스 = 각 free_node 부피의 합 (작을수록 빈틈없이 채운 것)
+    best_linear_waste = sum(n.volume for n in best_result.free_nodes)
 
     # GRASP 다중 패스
     while True:
@@ -315,12 +370,16 @@ def pack_parts(
         
         result = _pack_parts_single(settings, test_stocks, test_parts)
         unplaced = sum(result.unplaced.values())
-        largest_offcut = max((n.volume for n in result.free_nodes), default=0.0)
-        
-        # 미배치 수가 적거나, 같을 경우 단일 잔재가 더 크게 남는 것을 1등으로 선택
-        if unplaced < best_unplaced or (unplaced == best_unplaced and largest_offcut > best_largest_offcut):
+        # 총 선형 로스: 남은 FREE 노드 부피 합 (미배치 공간 총량)
+        linear_waste = sum(n.volume for n in result.free_nodes)
+
+        # 1순위: 미배치 부품 수 최소
+        # 2순위: 총 선형 로스 최소 (자투리 공간을 알뜰하게 활용한 도면 선택)
+        if unplaced < best_unplaced or (
+            unplaced == best_unplaced and linear_waste < best_linear_waste
+        ):
             best_unplaced = unplaced
-            best_largest_offcut = largest_offcut
+            best_linear_waste = linear_waste
             best_result = result
             
     best_result.processing_time = time.perf_counter() - start_total
