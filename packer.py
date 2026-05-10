@@ -54,7 +54,7 @@ class NodeHeap:
 
     def pop(self) -> Optional[Node]:
         while self._heap:
-            neg_vol, node_id, node = heapq.heappop(self._heap)
+            neg_depth, neg_vol, node_id, node = heapq.heappop(self._heap)
             if node_id in self._removed:
                 continue
             if node.state != NodeState.FREE:
