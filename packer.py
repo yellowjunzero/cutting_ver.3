@@ -294,6 +294,7 @@ class PackResult:
     unplaced: Dict[str, int]
     processing_time: float
     stocks_used: int
+    free_nodes: List[Node] = field(default_factory=list)  # ✨ 남은 잔재(빈 공간) 리스트 추가
 
 
 # ─────────────────────────────────────────────
@@ -314,7 +315,7 @@ def pack_parts(
         parts: 부품 목록
 
     Returns:
-        PackResult(occupied_nodes, unplaced, processing_time, stocks_used)
+        PackResult(occupied_nodes, unplaced, processing_time, stocks_used, free_nodes)
     """
     start = time.perf_counter()
 
@@ -392,10 +393,18 @@ def pack_parts(
         for free_node in new_free:
             heap.push(free_node)
 
+    # ✨ 루프 종료 후, 힙에 남아있는 사용되지 않은 잔재(FREE)들을 긁어모읍니다.
+    free_nodes = []
+    for item in heap._heap:
+        node = item[-1]  # 튜플의 마지막 요소가 Node 객체
+        if node.node_id not in heap._removed and node.state == NodeState.FREE:
+            free_nodes.append(node)
+
     elapsed = time.perf_counter() - start
     return PackResult(
         occupied_nodes=occupied_nodes,
         unplaced={k: v for k, v in remaining.items() if v > 0},
         processing_time=elapsed,
         stocks_used=stocks_used,
+        free_nodes=free_nodes,  # ✨ 수집한 잔재 반환
     )
