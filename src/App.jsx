@@ -114,7 +114,10 @@ function PlacedBox({ placement, zOffset }) {
   );
 }
 
-function BoxEdges({ cx, cy, cz, l, w, t, hovered }) {
+// ─────────────────────────────────────────────
+// 3D 컴포넌트: 엣지 라인 렌더러 (공용)
+// ─────────────────────────────────────────────
+function BoxEdges({ cx, cy, cz, l, w, t, hovered, customColor, customLineWidth }) {
   const hl = l / 2, hw = w / 2, ht = t / 2;
   const corners = [
     [-hl,-hw,-ht],[hl,-hw,-ht],[hl,hw,-ht],[-hl,hw,-ht],
@@ -127,54 +130,77 @@ function BoxEdges({ cx, cy, cz, l, w, t, hovered }) {
     [0,4],[1,5],[2,6],[3,7],
   ];
 
-  const color = hovered ? "#ffffff" : "rgba(255,255,255,0.25)";
+  const color = customColor || (hovered ? "#ffffff" : "rgba(255,255,255,0.25)");
+  const lw = customLineWidth || (hovered ? 1.5 : 0.8);
 
   return (
     <>
       {edges.map(([a, b], i) => (
-        <Line
-          key={i}
-          points={[corners[a], corners[b]]}
-          color={color}
-          lineWidth={hovered ? 1.5 : 0.8}
-        />
+        <Line key={i} points={[corners[a], corners[b]]} color={color} lineWidth={lw} />
       ))}
     </>
   );
 }
 
 // ─────────────────────────────────────────────
-// 3D 컴포넌트: 원장 아웃라인 (usable_dims 기준)
+// 3D 컴포넌트: 원장 아웃라인 (Original + Usable 이중 렌더링)
 // ─────────────────────────────────────────────
 function StockOutline({ summary, zOffset }) {
-  const { l, w, t } = summary.usable_dims;
-  // usable 영역의 origin = trimming 오프셋
-  // original_dims - usable_dims 차이의 절반이 trim
-  const trimX = (summary.original_dims.l - l) / 2;
-  const trimY = (summary.original_dims.w - w) / 2;
+  const orig = summary.original_dims;
+  const usable = summary.usable_dims;
 
-  const cx = (trimX + l / 2) * SCALE;
-  const cy = (trimY + w / 2) * SCALE;
-  const cz = (t / 2) * SCALE + zOffset;
+  // 1. 트리밍 전 원장의 정중앙 좌표 (기준점)
+  const ocx = (orig.l / 2) * SCALE;
+  const ocy = (orig.w / 2) * SCALE;
+  const ocz = (orig.t / 2) * SCALE + zOffset;
 
-  const hl = l * SCALE / 2, hw = w * SCALE / 2, ht = t * SCALE / 2;
-  const corners = [
-    [-hl,-hw,-ht],[hl,-hw,-ht],[hl,hw,-ht],[-hl,hw,-ht],
-    [-hl,-hw,ht],[hl,-hw,ht],[hl,hw,ht],[-hl,hw,ht],
-  ].map(([x,y,z]) => new THREE.Vector3(cx+x, cy+y, cz+z));
-
-  const edges = [
-    [0,1],[1,2],[2,3],[3,0],
-    [4,5],[5,6],[6,7],[7,4],
-    [0,4],[1,5],[2,6],[3,7],
-  ];
+  // 2. 트리밍 후 실제 사용 가능 영역의 정중앙 좌표
+  const trimX = (orig.l - usable.l) / 2;
+  const trimY = (orig.w - usable.w) / 2;
+  const trimZ = (orig.t - usable.t) / 2;
+  
+  const ucx = (trimX + usable.l / 2) * SCALE;
+  const ucy = (trimY + usable.w / 2) * SCALE;
+  const ucz = (trimZ + usable.t / 2) * SCALE + zOffset;
 
   return (
-    <>
-      {edges.map(([a, b], i) => (
-        <Line key={i} points={[corners[a], corners[b]]} color="#3b82f6" lineWidth={1.2} />
-      ))}
-    </>
+    <group>
+      {/* 바깥쪽 전체 원장 테두리 (어두운 회색) */}
+      <BoxEdges cx={ocx} cy={ocy} cz={ocz} l={orig.l * SCALE} w={orig.w * SCALE} t={orig.t * SCALE} 
+                customColor="#334155" customLineWidth={1} />
+      
+      {/* 안쪽 실제 작업 영역 (파란색) */}
+      <BoxEdges cx={ucx} cy={ucy} cz={ucz} l={usable.l * SCALE} w={usable.w * SCALE} t={usable.t * SCALE} 
+                customColor="#3b82f6" customLineWidth={1.5} />
+    </group>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ✨ 3D 컴포넌트: 투명 잔재 (Offcuts) 렌더러
+// ─────────────────────────────────────────────
+function OffcutBox({ offcut, zOffset }) {
+  const { l, w, t } = offcut.dims;
+  const { x, y, z } = offcut.origin;
+
+  // 톱날(Kerf) 두께 수준의 너무 얇은 잔재는 시각적 방해를 막기 위해 숨김 처리
+  if (l < 6 || w < 6 || t < 6) return null;
+
+  const cx = (x + l / 2) * SCALE;
+  const cy = (y + w / 2) * SCALE;
+  const cz = (z + t / 2) * SCALE + zOffset;
+
+  return (
+    <mesh position={[cx, cy, cz]}>
+      <boxGeometry args={[l * SCALE, w * SCALE, t * SCALE]} />
+      {/* 반투명 유리 상자 재질 */}
+      <meshStandardMaterial color="#64748b" transparent opacity={0.15} roughness={0.9} depthWrite={false} />
+      {/* 잔재 윤곽선 (옅은 회색) */}
+      <lineSegments>
+        <edgesGeometry args={[new THREE.BoxGeometry(l * SCALE, w * SCALE, t * SCALE)]} />
+        <lineBasicMaterial color="#94a3b8" transparent opacity={0.3} />
+      </lineSegments>
+    </mesh>
   );
 }
 
@@ -223,7 +249,6 @@ function CameraController({ response, orbitRef }) {
 function Scene({ response }) {
   const orbitRef = useRef();
 
-  // 원장별 Z 오프셋 계산
   const stockZOffsets = useMemo(() => {
     if (!response) return {};
     const offsets = {};
@@ -235,7 +260,6 @@ function Scene({ response }) {
     return offsets;
   }, [response]);
 
-  // stock_id 중복 없이 처리 (복수 원장)
   const stockList = useMemo(() => {
     if (!response) return [];
     const seen = new Set();
@@ -255,28 +279,21 @@ function Scene({ response }) {
       <directionalLight position={[5, 8, 5]} intensity={1.0} castShadow />
       <directionalLight position={[-3, -2, -3]} intensity={0.3} />
 
-      <gridHelper
-        args={[20, 40, "#1e293b", "#1e293b"]}
-        position={[0, -0.01, 0]}
-        rotation={[0, 0, 0]}
-      />
+      <gridHelper args={[20, 40, "#1e293b", "#1e293b"]} position={[0, -0.01, 0]} rotation={[0, 0, 0]} />
 
       {/* 원장 아웃라인 */}
       {response && stockList.map((s) => (
-        <StockOutline
-          key={s.stock_id}
-          summary={s}
-          zOffset={stockZOffsets[s.stock_id] ?? 0}
-        />
+        <StockOutline key={s.stock_id} summary={s} zOffset={stockZOffsets[s.stock_id] ?? 0} />
       ))}
 
       {/* 배치된 부품들 */}
       {response && response.placements.map((p) => (
-        <PlacedBox
-          key={p.node_id}
-          placement={p}
-          zOffset={stockZOffsets[p.stock_id] ?? 0}
-        />
+        <PlacedBox key={p.node_id} placement={p} zOffset={stockZOffsets[p.stock_id] ?? 0} />
+      ))}
+
+      {/* ✨ 남은 잔재(투명 박스)들 */}
+      {response && response.offcuts && response.offcuts.map((offcut) => (
+        <OffcutBox key={offcut.node_id} offcut={offcut} zOffset={stockZOffsets[offcut.stock_id] ?? 0} />
       ))}
     </>
   );
