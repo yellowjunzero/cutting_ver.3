@@ -29,7 +29,7 @@ const DEFAULT_STOCKS = [
 ];
 
 const DEFAULT_PARTS = [
-  { _uid: uid(), id: "P1", l: 0, w: 0, t: 0, qty: 0, lock_z: true, allow_xy_rotation: true, priority: 0, color: PART_COLORS[0] },
+  { _uid: uid(), id: "P1", l: 0, w: 0, t: 0, qty: 0, lock_z: false, allow_xy_rotation: true, priority: 0, color: PART_COLORS[0] },
 ];
 
 // ─────────────────────────────────────────────
