@@ -76,10 +76,9 @@ class NodeHeap:
 
 @dataclass(order=True)
 class PlacementCandidate:
-    dead_volume: float        # 1순위: 당장 발생하는 데드 스페이스 (절대악)
-    linear_waste: float       # 2순위: 축별 장기 예상 쓰레기 합산
-    rotation_penalty: int     # ✨ 3순위: 동점이면 쓸데없이 돌리지 말고 '자르던 대로(원래 방향)' 유지!
-    neg_max_offcut: float     # 4순위: 단일 최대 잔재 크기 (음수)
+    linear_waste: float       # 1순위: 장기적인 로스율 최소화
+    rotation_penalty: int     # 2순위: 동점일 경우 눕혀서(원래 방향대로) 일관성 유지
+    neg_max_offcut: float     # 3순위: 단일 최대 잔재 크기 (음수)
     node_id: str = field(compare=False)
     node: Node = field(compare=False)
     part: Part = field(compare=False)
@@ -88,35 +87,18 @@ class PlacementCandidate:
 
 
 # ─────────────────────────────────────────────
-# 잔재 활용성 평가 (Dead Space 감지)
+# Max-Offcut 절단 순서 최적화
 # ─────────────────────────────────────────────
 
 _ALL_AXES = [CutAxis.X, CutAxis.Y, CutAxis.Z]
 _ALL_ORDERS = list(permutations(_ALL_AXES))  # 6가지
 
-def _can_fit_any(
-    dims: Dims,
-    remaining_parts: Dict[str, int],
-    parts_by_id: Dict[str, Part],
-    current_part_id: str,
-) -> bool:
-    """이 공간(dims)에 남은 부품 중 하나라도 들어갈 수 있는지 확인"""
-    for pid, qty in remaining_parts.items():
-        available_qty = qty - 1 if pid == current_part_id else qty
-        if available_qty <= 0:
-            continue
-        part = parts_by_id[pid]
-        for orient in part.allowed_orientations():
-            if orient.fits_in(dims):
-                return True
-    return False
-
-def _simulate_cut_order(
+def _offcut_volumes_for_order(
     node: Node,
     part_dims: Dims,
     cut_order: Tuple[CutAxis, ...],
     kerf: float,
-) -> Optional[List[Dims]]:
+) -> Optional[Tuple[float, ...]]:
     remaining = {
         CutAxis.X: node.dims.l,
         CutAxis.Y: node.dims.w,
@@ -127,7 +109,7 @@ def _simulate_cut_order(
         CutAxis.Y: part_dims.w,
         CutAxis.Z: part_dims.t,
     }
-    offcuts = []
+    offcut_vols = []
 
     for axis in cut_order:
         pos = part_size[axis]
@@ -135,6 +117,7 @@ def _simulate_cut_order(
 
         if abs(total - pos) <= _EPSILON:
             remaining[axis] = pos
+            offcut_vols.append(0.0)
             continue
 
         remainder = total - pos - kerf
@@ -142,13 +125,43 @@ def _simulate_cut_order(
             return None  
 
         b_dims_map = {**remaining, axis: remainder}
-        offcuts.append(Dims(l=b_dims_map[CutAxis.X], w=b_dims_map[CutAxis.Y], t=b_dims_map[CutAxis.Z]))
+        b_vol = (
+            b_dims_map[CutAxis.X]
+            * b_dims_map[CutAxis.Y]
+            * b_dims_map[CutAxis.Z]
+        )
+        offcut_vols.append(b_vol)
         remaining[axis] = pos
 
-    return offcuts
+    return tuple(offcut_vols)
+
+def _best_cut_order(
+    node: Node,
+    part_dims: Dims,
+    kerf: float,
+) -> Optional[Tuple[Tuple[CutAxis, ...], float]]:
+    best_order = None
+    best_max_offcut = -1.0
+
+    for order in _ALL_ORDERS:
+        result = _offcut_volumes_for_order(node, part_dims, order, kerf)
+        if result is None:
+            continue
+        max_offcut = max(result) if result else 0.0
+        if max_offcut > best_max_offcut:
+            best_max_offcut = max_offcut
+            best_order = order
+
+    if best_order is None:
+        return None
+    return best_order, best_max_offcut
+
+
+# ─────────────────────────────────────────────
+# Best-Fit 후보 선택 (Linear Waste + Rotation Penalty)
+# ─────────────────────────────────────────────
 
 def _axis_waste(total: float, pdim: float, kerf: float) -> float:
-    """1D 시뮬레이션: 해당 축으로 끝까지 채웠을 때 최종적으로 남는 쓰레기"""
     if pdim > total + _EPSILON:
         return total
     count = int((total + kerf + _EPSILON) // (pdim + kerf))
@@ -156,15 +169,6 @@ def _axis_waste(total: float, pdim: float, kerf: float) -> float:
         return total
     waste = total - (count * pdim) - (count - 1) * kerf
     return max(0.0, waste)
-
-
-# ─────────────────────────────────────────────
-# Best-Fit 후보 선택 (Dead Volume + Linear Waste)
-# ─────────────────────────────────────────────
-
-# ─────────────────────────────────────────────
-# Best-Fit 후보 선택 (Dead Volume + Linear Waste + Rotation Penalty)
-# ─────────────────────────────────────────────
 
 def _find_best_candidate(
     node: Node,
@@ -189,44 +193,34 @@ def _find_best_candidate(
             lw_z = _axis_waste(node.dims.t, orientation.t, kerf)
             total_linear_waste = lw_x + lw_y + lw_z
 
-            # ✨ 2. 회전 페널티 계산 (일관성 유지의 핵심)
+            # 2. 회전 페널티 계산 (일관성 유지)
             if orientation.l == part.dims.l and orientation.w == part.dims.w and orientation.t == part.dims.t:
-                rot_penalty = 0  # 완벽히 일치 (회전 안 함 = 한칼에 계속 자름)
+                rot_penalty = 0
             elif orientation.t == part.dims.t:
-                rot_penalty = 1  # 2D 평면 회전 (두께는 유지)
+                rot_penalty = 1
             else:
-                rot_penalty = 2  # 3D 입체 회전 (두께가 바뀜, 작업 번거로움)
+                rot_penalty = 2
 
-            for order in _ALL_ORDERS:
-                offcuts = _simulate_cut_order(node, orientation, order, kerf)
-                if offcuts is None:
-                    continue
+            # 3. 최대 잔재 절단 순서 선택
+            order_result = _best_cut_order(node, orientation, kerf)
+            if order_result is None:
+                continue
 
-                dead_vol = 0.0
-                max_offcut = 0.0
+            best_order, max_offcut = order_result
 
-                for offcut in offcuts:
-                    vol = offcut.volume
-                    if vol > max_offcut:
-                        max_offcut = vol
-                    
-                    if not _can_fit_any(offcut, remaining_parts, parts_by_id, part_id):
-                        dead_vol += vol
+            candidate = PlacementCandidate(
+                linear_waste=total_linear_waste,
+                rotation_penalty=rot_penalty,
+                neg_max_offcut=-max_offcut,
+                node_id=node.node_id,
+                node=node,
+                part=part,
+                orientation=orientation,
+                cut_order=best_order,
+            )
 
-                candidate = PlacementCandidate(
-                    dead_volume=dead_vol,
-                    linear_waste=total_linear_waste,
-                    rotation_penalty=rot_penalty,  # ✨ 페널티 지능 적용!
-                    neg_max_offcut=-max_offcut,
-                    node_id=node.node_id,
-                    node=node,
-                    part=part,
-                    orientation=orientation,
-                    cut_order=order,
-                )
-
-                if best is None or candidate < best:
-                    best = candidate
+            if best is None or candidate < best:
+                best = candidate
 
     return best
 
