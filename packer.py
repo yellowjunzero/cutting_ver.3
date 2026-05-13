@@ -96,16 +96,12 @@ def _get_lwt(dims_obj) -> Tuple[float, float, float]:
     return l, w, t
 
 
-# ── [A] _offcut_score_for_order (스케일 독립 체적 + short_edge 선형 보정) ──
+# ── [A] _offcut_score_for_order (정육면체 지향 + 가장 긴 축 절단 우대) ──
 
 def _offcut_score_for_order(
-    node,
-    part_dims,
-    cut_order: Tuple[CutAxis, ...],
-    kerf: float,
+    node: Node, part_dims: Dims, cut_order: Tuple[CutAxis, ...], kerf: float,
     axis_bias: Tuple[float, float, float] = _DEFAULT_AXIS_BIAS,
 ) -> Optional[float]:
-    _REF_EDGE = 300.0
     _MIN_EDGE =  30.0
 
     n_l, n_w, n_t = _get_lwt(node.dims)
@@ -115,11 +111,8 @@ def _offcut_score_for_order(
     part_size = {CutAxis.X: p_l, CutAxis.Y: p_w, CutAxis.Z: p_t}
     bias_map  = {CutAxis.X: axis_bias[0], CutAxis.Y: axis_bias[1], CutAxis.Z: axis_bias[2]}
 
-    # [A] 핵심 변경: max -> sum
-    # max 방식: 각 step 중 최고 점수 1개만 반영 → X절단이 항상 독점해 동점 발생
-    # sum 방식: 모든 step의 잔재 점수를 합산 → 절단 순서 전체를 평가해 완전한 변별력
     total_score = 0.0
-    valid = False  # 최소 1개 step에서 유효 잔재가 발생해야 함
+    valid = False 
 
     for axis in cut_order:
         pos   = part_size[axis]
@@ -136,23 +129,37 @@ def _offcut_score_for_order(
         if remainder <= _EPSILON:
             remaining[axis] = pos
             continue
+            
+        # ✨ 핵심 로직: 현재 자르려는 축이 남은 공간 중 가장 긴 축인지 확인 (가래떡 썰기)
+        is_longest_axis = (total == max(remaining.values()))
 
         rem_l = remainder  if axis == CutAxis.X else remaining[CutAxis.X]
         rem_w = remainder  if axis == CutAxis.Y else remaining[CutAxis.Y]
         rem_t = remainder  if axis == CutAxis.Z else remaining[CutAxis.Z]
 
-        short_edge = min(rem_l, rem_w)
+        min_edge = min(rem_l, rem_w, rem_t)
+        max_edge = max(rem_l, rem_w, rem_t)
 
-        if short_edge >= _MIN_EDGE:
+        if min_edge >= _MIN_EDGE:
             remainder_vol = rem_l * rem_w * rem_t
-            edge_bonus    = max(short_edge / _REF_EDGE, 1.0)
-            step_score    = remainder_vol * edge_bonus * bias_map[axis]
+            
+            # ✨ 정육면체 지향 (Squarity) 보너스
+            # 비율이 1.0(정육면체)에 가까울수록 높은 점수
+            squarity = min_edge / max_edge if max_edge > 0 else 1.0
+            cube_bonus = 1.0 + (squarity * 5.0) 
+            
+            # ✨ 가장 긴 축(Longest Axis First) 절단 우대
+            # 폭(W)이나 두께(T) 대신 길이(L)를 먼저 절단하여 
+            # 원장의 폭/두께를 온전히 보존하는 순서에 강력한 가중치 부여
+            if is_longest_axis:
+                cube_bonus *= 3.0
+                
+            step_score    = remainder_vol * cube_bonus * bias_map[axis]
             total_score  += step_score
             valid = True
 
         remaining[axis] = pos
 
-    # 유효 잔재가 하나도 없으면 0 반환 (None 아님: 절단 자체는 가능)
     return total_score if valid else 0.0
 
 
