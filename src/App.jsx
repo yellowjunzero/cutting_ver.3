@@ -4,7 +4,7 @@ import { OrbitControls, Html, Line } from "@react-three/drei";
 import * as THREE from "three";
 
 // 🚨 주의: 아래 API_URL을 Render에서 발급받은 새로운 백엔드 주소로 교체하세요!
-const API_URL = "https://cutting-ver-3-backend.onrender.com"; 
+const API_URL = "https://cutting-ver-3-1.onrender.com"; 
 
 const SCALE = 0.001;
 const STOCK_GAP = 0.5;
