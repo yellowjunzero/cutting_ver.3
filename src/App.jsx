@@ -3,7 +3,9 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Html, Line } from "@react-three/drei";
 import * as THREE from "three";
 
-const API_URL = "https://cutting-ver-3-1.onrender.com";
+// 🚨 주의: 아래 API_URL을 Render에서 발급받은 새로운 백엔드 주소로 교체하세요!
+const API_URL = "https://cutting-ver-3-backend.onrender.com"; 
+
 const SCALE = 0.001;
 const STOCK_GAP = 0.5;
 const CAM_X_OFFSET = -0.73;
@@ -16,7 +18,12 @@ const PART_COLORS = [
 ];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const DEFAULT_SETTINGS = { kerf: 5, trimming: { x: 0, y: 0, z: 0 } };
+const DEFAULT_SETTINGS = {
+  kerf: 5,
+  trimming: { x: 0, y: 0, z: 0 },
+  machine_speed_mm_per_sec: 50,
+  setup_time_sec: 10,
+};
 const DEFAULT_STOCKS = [{ _uid: uid(), id: "S1", l: 0, w: 0, t: 0, qty: 0 }];
 const DEFAULT_PARTS  = [
   { _uid: uid(), id: "P1", l: 0, w: 0, t: 0, qty: 0,
@@ -114,7 +121,7 @@ function PlacedBox({ placement, zOffset }) {
               {placement.part_id}
               {isStrip&&<span style={{color:STRIP_BBOX_COLOR,fontSize:10,marginLeft:6}}>✦ STRIP</span>}
             </div>
-            <div style={{color:"#aaa"}}>{l}×{w}×{t} mm</div>
+            <div style={{color:"#aaa"}}>{l}x{w}x{t} mm</div>
             <div style={{color:"#666",fontSize:10,marginTop:3}}>
               x:{x.toFixed(1)} y:{y.toFixed(1)} z:{z.toFixed(1)}
             </div>
@@ -134,7 +141,7 @@ function StripBoundingBox({ bbox }) {
   const cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
   const lx=maxX-minX, ly=maxY-minY, lz=maxZ-minZ;
   return <BoxEdges cx={cx} cy={cy} cz={cz} l={lx+0.001} w={ly+0.001} t={lz+0.001}
-           color={STRIP_BBOX_COLOR} lineWidth={2.0} />;
+    color={STRIP_BBOX_COLOR} lineWidth={2.0} />;
 }
 
 function StockOutline({ summary, zOffset }) {
@@ -174,7 +181,7 @@ function OffcutBox({ offcut, zOffset }) {
             padding:"6px 10px",color:"#e0f2fe",fontSize:11,fontFamily:"'DM Mono',monospace",
             whiteSpace:"nowrap",pointerEvents:"none"}}>
             <div style={{fontWeight:700,color:"#38bdf8",marginBottom:3}}>✂ 잔재 (Offcut)</div>
-            <div>{l.toFixed(1)}×{w.toFixed(1)}×{t.toFixed(1)} mm</div>
+            <div>{l.toFixed(1)}x{w.toFixed(1)}x{t.toFixed(1)} mm</div>
           </div>
         </Html>
       )}
@@ -418,6 +425,56 @@ function ResultDashboard({ stats, failures }) {
         </div>
       </div>
 
+      {stats.total_estimated_time_sec != null && (
+        <div style={{...card, border:"1px solid #1e3a5f", background:"#060f1e"}}>
+          <div style={{fontSize:9,color:"#60a5fa",letterSpacing:1.5,fontFamily:mono,marginBottom:10,textTransform:"uppercase"}}>
+            ⏱ 예상 작업 시간
+          </div>
+          <div style={{
+            background:"linear-gradient(135deg,#1e3a5f,#1e293b)",
+            borderRadius:8, padding:"10px 12px", marginBottom:10,
+            border:"1px solid #2563eb44",
+          }}>
+            <div style={{fontSize:9,color:"#93c5fd",fontFamily:mono,marginBottom:4,letterSpacing:1}}>총 예상 시간</div>
+            <div style={{fontSize:22,fontWeight:900,color:"#60a5fa",fontFamily:mono,lineHeight:1}}>
+              {(()=>{
+                const t = stats.total_estimated_time_sec || 0;
+                const h = Math.floor(t / 3600);
+                const m = Math.floor((t % 3600) / 60);
+                const s2 = Math.floor(t % 60);
+                if (h > 0) return `${h}시간 ${m}분 ${s2}초`;
+                if (m > 0) return `${m}분 ${s2}초`;
+                return `${s2}초`;
+              })()}
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div>
+              <div style={{fontSize:9,color:"#475569",letterSpacing:1.5,fontFamily:mono,textTransform:"uppercase"}}>셋팅 변경</div>
+              <div style={{fontSize:18,fontWeight:800,color:"#fb923c",fontFamily:mono,lineHeight:1.2}}>
+                {stats.setup_count ?? 0}<span style={{fontSize:11,fontWeight:400,marginLeft:3}}>회</span>
+              </div>
+            </div>
+            <div>
+              <div style={{fontSize:9,color:"#475569",letterSpacing:1.5,fontFamily:mono,textTransform:"uppercase"}}>순수 작업</div>
+              <div style={{fontSize:18,fontWeight:800,color:"#a78bfa",fontFamily:mono,lineHeight:1.2}}>
+                {(()=>{
+                  const t = stats.pure_cut_time_sec || 0;
+                  const m = Math.floor(t / 60);
+                  const s2 = Math.floor(t % 60);
+                  return m > 0 ? `${m}분 ${s2}초` : `${s2}초`;
+                })()}
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#334155",
+            fontFamily:mono,borderTop:"1px solid #1e293b",paddingTop:6,marginTop:4}}>
+            <span>속도 {stats.machine_speed_mm_per_sec}mm/s</span>
+            <span>셋팅 {stats.setup_time_sec}s/회</span>
+          </div>
+        </div>
+      )}
+
       {failures?.length>0&&(
         <div style={{background:"#1c0a0a",border:"1px solid #7f1d1d",borderRadius:8,padding:"10px 12px"}}>
           {failures.map((f,i)=>(
@@ -436,8 +493,8 @@ function NumberInput({ value, onChange, min=0, label, unit="mm" }) {
       <div style={{position:"relative"}}>
         <input type="number" value={value} min={min} onChange={(e)=>onChange(Number(e.target.value))}
           style={{width:"100%",boxSizing:"border-box",background:"#0f172a",border:"1px solid #1e293b",
-            borderRadius:6,color:"#e2e8f0",padding:"7px 28px 7px 10px",fontSize:13,
-            fontFamily:"'DM Mono',monospace",outline:"none"}}
+          borderRadius:6,color:"#e2e8f0",padding:"7px 28px 7px 10px",fontSize:13,
+          fontFamily:"'DM Mono',monospace",outline:"none"}}
           onFocus={(e)=>e.target.style.borderColor="#3b82f6"}
           onBlur={(e)=>e.target.style.borderColor="#1e293b"}/>
         <span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:10,color:"#475569"}}>{unit}</span>
@@ -469,9 +526,15 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
 
   const requestBody = useMemo(()=>({
-    settings:{ kerf:settings.kerf,trimming:settings.trimming,optimization_goal:"MINIMIZE_WASTE" },
-    stocks: stocks.map(({_uid,...s})=>s),
-    parts:  parts.map(({_uid,...p})=>p),
+    settings:{
+      kerf: settings.kerf,
+      trimming: settings.trimming,
+      optimization_goal: "MINIMIZE_WASTE",
+      machine_speed_mm_per_sec: settings.machine_speed_mm_per_sec,
+      setup_time_sec: settings.setup_time_sec,
+    },
+    stocks: stocks.map(({_uid, ...s})=>s),
+    parts:  parts.map(({_uid, ...p})=>p),
   }),[settings,stocks,parts]);
 
   const handleOptimize = async () => {
@@ -486,14 +549,13 @@ export default function App() {
     } catch(e) { setError(e.message); } finally { setLoading(false); }
   };
 
-  const addStock   = ()=>setStocks((p)=>[...p,{_uid:uid(),id:`S${p.length+1}`,l:0,w:0,t:0,qty:0}]);
-  const updateStock = (i,k,v)=>setStocks((p)=>p.map((s,j)=>j===i?{...s,[k]:v}:s));
-  const removeStock = (i)=>setStocks((p)=>p.filter((_,j)=>j!==i));
+  const addStock    = () => setStocks((p)=>[...p, {_uid:uid(), id:`S${p.length+1}`, l:0, w:0, t:0, qty:0}]);
+  const updateStock = (i,k,v) => setStocks((p)=>p.map((s,j)=>j===i ? {...s, [k]:v} : s));
+  const removeStock = (i) => setStocks((p)=>p.filter((_,j)=>j!==i));
 
-  const addPart = ()=>setParts((p)=>[...p,{_uid:uid(),id:`P${p.length+1}`,l:0,w:0,t:0,qty:0,
-    lock_z:false,allow_xy_rotation:true,priority:0,color:PART_COLORS[p.length%PART_COLORS.length]}]);
-  const updatePart = (i,k,v)=>setParts((p)=>p.map((s,j)=>j===i?{...s,[k]:v}:s));
-  const removePart  = (i)=>setParts((p)=>p.filter((_,j)=>j!==i));
+  const addPart     = () => setParts((p)=>[...p, {_uid:uid(), id:`P${p.length+1}`, l:0, w:0, t:0, qty:0, lock_z:false, allow_xy_rotation:true, priority:0, color:PART_COLORS[p.length%PART_COLORS.length]}]);
+  const updatePart  = (i,k,v) => setParts((p)=>p.map((s,j)=>j===i ? {...s, [k]:v} : s));
+  const removePart  = (i) => setParts((p)=>p.filter((_,j)=>j!==i));
 
   const mono="'DM Mono',monospace";
   const sidebar={width:292,minWidth:292,height:"100vh",background:"#060d1a",
@@ -513,11 +575,10 @@ export default function App() {
           <div style={{fontSize:15,fontWeight:800,color:"#e2e8f0",fontFamily:mono,letterSpacing:-0.5}}>
             ✦ CUT OPTIMIZER
           </div>
-          <div style={{fontSize:10,color:"#475569",marginTop:2,letterSpacing:1}}>3D GUILLOTINE ENGINE v4.0</div>
+          <div style={{fontSize:10,color:"#475569",marginTop:2,letterSpacing:1}}>3D GUILLOTINE ENGINE v4.1</div>
         </div>
 
         <div style={{flex:1,overflowY:"auto",padding:"16px 14px",scrollbarWidth:"thin",scrollbarColor:"#1e293b transparent"}}>
-
           <div style={{marginBottom:20}}>
             <div style={sLbl}>⚙ Settings</div>
             <div style={card}>
@@ -526,11 +587,23 @@ export default function App() {
                 <div/>
               </div>
               <div style={{fontSize:10,color:"#475569",marginBottom:6,letterSpacing:1}}>TRIMMING (양단 합산)</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:10}}>
                 {[{ax:"z",lb:"T-T"},{ax:"y",lb:"T-W"},{ax:"x",lb:"T-L"}].map(({ax,lb})=>(
                   <NumberInput key={ax} label={lb} value={settings.trimming[ax]}
                     onChange={(v)=>setSettings((s)=>({...s,trimming:{...s.trimming,[ax]:v}}))}/>
                 ))}
+              </div>
+              <div style={{fontSize:10,color:"#475569",marginBottom:6,letterSpacing:1,
+                borderTop:"1px solid #1e293b",paddingTop:8}}>
+                작업 시간 추정
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                <NumberInput label="가공 속도" value={settings.machine_speed_mm_per_sec} min={1}
+                  unit="mm/s"
+                  onChange={(v)=>setSettings((s)=>({...s,machine_speed_mm_per_sec:v}))}/>
+                <NumberInput label="셋팅 시간" value={settings.setup_time_sec} min={0}
+                  unit="sec"
+                  onChange={(v)=>setSettings((s)=>({...s,setup_time_sec:v}))}/>
               </div>
             </div>
           </div>
@@ -630,7 +703,7 @@ export default function App() {
             alignItems:"center",justifyContent:"center",background:"rgba(3,7,18,0.7)",backdropFilter:"blur(4px)"}}>
             <div style={{width:40,height:40,border:"3px solid #1e293b",
               borderTop:"3px solid #3b82f6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-            <div style={{color:"#64748b",marginTop:16,fontFamily:mono,fontSize:12}}>Phase 4.0 최적화 계산 중...</div>
+            <div style={{color:"#64748b",marginTop:16,fontFamily:mono,fontSize:12}}>Phase 4.1 최적화 계산 중...</div>
           </div>
         )}
 

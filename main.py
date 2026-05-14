@@ -1,21 +1,11 @@
 """
-main.py — FastAPI HTTP 레이어 (Phase 4.0)
-
-책임:
-  - HTTP 요청/응답 직렬화 (Pydantic)
-  - 입력 검증 + 의미론적 사전 검사 (model_validator)
-  - CPU 작업 격리 (run_in_threadpool)
-  - 예외 → HTTP 상태코드 변환
-  - Phase 4.0: VirtualStrip 해체 → 개별 PlacedPartOut 변환
-
-배포 명령:
-  uvicorn main:app --host 0.0.0.0 --port 8000
+main.py — FastAPI HTTP 레이어 (Phase 4.1)
 """
-
 from __future__ import annotations
 
 import functools
-import uuid
+import math
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -26,8 +16,6 @@ from pydantic import BaseModel, Field, model_validator
 import phase4 as _phase4
 from core import (
     CuttingError,
-    Cut,
-    CutAxis,
     Dims,
     EngineSettings,
     InvalidCutError,
@@ -36,18 +24,16 @@ from core import (
     Part,
     Stock,
     TrimmingMargins,
-    _new_id,
 )
 from packer import StripAdapter
 from virtual_strip import VirtualStrip
 
-# Phase 4.0 time_budget (초)
 _PHASE4_TIME_BUDGET: float = 30.0
 
 app = FastAPI(
     title="3D Guillotine Cut Optimizer",
-    version="4.0.0",
-    description="목재·철강·스폰지 등 판재 최적 재단 API — Phase 4.0 Strip Engine",
+    version="4.1.0",
+    description="판재 최적 재단 API — Phase 4.1 Strip Engine",
 )
 
 app.add_middleware(
@@ -58,22 +44,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ─────────────────────────────────────────────
-# Pydantic 입력 모델  (기존 골격 유지)
-# ─────────────────────────────────────────────
-
 class TrimmingIn(BaseModel):
     x: float = Field(0.0, ge=0, description="X축 양단 여백 합산 (mm)")
     y: float = Field(0.0, ge=0, description="Y축 양단 여백 합산 (mm)")
     z: float = Field(0.0, ge=0, description="Z축 양단 여백 합산 (mm)")
 
-
 class SettingsIn(BaseModel):
     kerf: float = Field(3.0, ge=0, le=50, description="톱날 두께 손실 (mm)")
     trimming: TrimmingIn = Field(default_factory=TrimmingIn)
     optimization_goal: str = Field("MINIMIZE_WASTE")
-
+    machine_speed_mm_per_sec: float = Field(50.0, gt=0, description="기계 절단 속도 (mm/s)")
+    setup_time_sec: float = Field(10.0, ge=0, description="1회 절단당 셋팅 시간 (s)")
 
 class StockIn(BaseModel):
     id: str = Field(..., min_length=1)
@@ -81,7 +62,6 @@ class StockIn(BaseModel):
     w: float = Field(..., gt=0, description="너비 (mm)")
     t: float = Field(..., gt=0, description="두께 (mm)")
     qty: int = Field(..., ge=1, le=1000)
-
 
 class PartIn(BaseModel):
     id: str = Field(..., min_length=1)
@@ -94,7 +74,6 @@ class PartIn(BaseModel):
     priority: int = Field(0, ge=0, le=100)
     color: str = Field("#4f8ef7")
 
-
 class OptimizeRequest(BaseModel):
     settings: SettingsIn
     stocks: List[StockIn] = Field(..., min_length=1)
@@ -102,7 +81,6 @@ class OptimizeRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_parts_fit_in_stocks(self) -> "OptimizeRequest":
-        """각 Part가 최소 1개 Stock에 들어갈 수 있는지 사전 검증"""
         kerf = self.settings.kerf
         trim = self.settings.trimming
 
@@ -116,13 +94,13 @@ class OptimizeRequest(BaseModel):
 
             fits = False
             for stock in self.stocks:
-                usable_l = stock.l - trim.x
-                usable_w = stock.w - trim.y
-                usable_t = stock.t - trim.z
-                if usable_l <= 0 or usable_w <= 0 or usable_t <= 0:
+                ul = stock.l - trim.x
+                uw = stock.w - trim.y
+                ut = stock.t - trim.z
+                if ul <= 0 or uw <= 0 or ut <= 0:
                     continue
                 for pl, pw, pt in part_orientations:
-                    if pl <= usable_l and pw <= usable_w and pt <= usable_t:
+                    if pl <= ul and pw <= uw and pt <= ut:
                         fits = True
                         break
                 if fits:
@@ -130,17 +108,10 @@ class OptimizeRequest(BaseModel):
 
             if not fits:
                 raise ValueError(
-                    f"부품 '{part.id}' ({part.l}×{part.w}×{part.t}mm)은 "
-                    f"어떤 원장에도 들어가지 않습니다. "
-                    f"원장 크기 또는 Trimming을 확인하세요."
+                    f"부품 '{part.id}' ({part.l}x{part.w}x{part.t}mm)은 "
+                    f"어떤 원장에도 들어가지 않습니다."
                 )
-
         return self
-
-
-# ─────────────────────────────────────────────
-# Pydantic 응답 모델  (기존 골격 유지)
-# ─────────────────────────────────────────────
 
 class DimsOut(BaseModel):
     l: float
@@ -148,12 +119,10 @@ class DimsOut(BaseModel):
     t: float
     volume: float
 
-
 class OriginOut(BaseModel):
     x: float
     y: float
     z: float
-
 
 class OffcutOut(BaseModel):
     node_id: str
@@ -161,14 +130,12 @@ class OffcutOut(BaseModel):
     dims: DimsOut
     origin: OriginOut
 
-
 class CutRecordOut(BaseModel):
     cut_id: str
     axis: str
     position: float
     kerf: float
     parent_node_id: str
-
 
 class PlacedPartOut(BaseModel):
     node_id: str
@@ -179,20 +146,17 @@ class PlacedPartOut(BaseModel):
     origin: OriginOut
     cut_history: List[CutRecordOut]
     depth: int
-    # Phase 4.0 추가: Strip 해체 정보
-    from_strip: bool = False        # True이면 VirtualStrip에서 해체된 부품
-    strip_id: Optional[str] = None  # 원본 Strip ID
-
+    from_strip: bool = False
+    strip_id: Optional[str] = None
 
 class StockSummaryOut(BaseModel):
     stock_id: str
     original_dims: DimsOut
     usable_dims: DimsOut
     placed_count: int
-    placed_volume: float    # 실제 부품 volume 합 (kerf 낭비 제외)
+    placed_volume: float
     usable_volume: float
     efficiency_pct: float
-
 
 class OptimizeResponse(BaseModel):
     placements: List[PlacedPartOut]
@@ -202,18 +166,12 @@ class OptimizeResponse(BaseModel):
     failures: List[str]
     stats: Dict[str, Any]
 
-
-# ─────────────────────────────────────────────
-# 도메인 변환 헬퍼  (기존 유지)
-# ─────────────────────────────────────────────
-
 def _build_engine_settings(s: SettingsIn) -> EngineSettings:
     return EngineSettings(
         kerf=s.kerf,
         trimming=TrimmingMargins(x=s.trimming.x, y=s.trimming.y, z=s.trimming.z),
         optimization_goal=OptimizationGoal.MINIMIZE_WASTE,
     )
-
 
 def _build_stocks(raw: List[StockIn], trim: TrimmingIn) -> List[Stock]:
     return [
@@ -225,7 +183,6 @@ def _build_stocks(raw: List[StockIn], trim: TrimmingIn) -> List[Stock]:
         )
         for s in raw
     ]
-
 
 def _build_parts(raw: List[PartIn]) -> List[Part]:
     return [
@@ -241,71 +198,8 @@ def _build_parts(raw: List[PartIn]) -> List[Part]:
         for p in raw
     ]
 
-
-# ─────────────────────────────────────────────
-# 응답 조립 헬퍼
-# ─────────────────────────────────────────────
-
-def _node_to_placed_out(node: Node) -> PlacedPartOut:
-    """일반 부품 Node → PlacedPartOut (기존 로직 유지)"""
-    dims   = node.placed_part_dims
-    origin = node.origin
-    history = node.collect_cut_history()
-
-    return PlacedPartOut(
-        node_id=node.node_id,
-        stock_id=node.stock_id or "",
-        part_id=node.placed_part.id,
-        color=node.placed_part.color,
-        placed_dims=DimsOut(l=dims.l, w=dims.w, t=dims.t, volume=dims.volume),
-        origin=OriginOut(x=origin.x, y=origin.y, z=origin.z),
-        cut_history=[
-            CutRecordOut(
-                cut_id=c.cut_id,
-                axis=c.axis.value,
-                position=c.position,
-                kerf=c.kerf,
-                parent_node_id=c.parent_node_id,
-            )
-            for c in history
-        ],
-        depth=node.depth,
-        from_strip=False,
-        strip_id=None,
-    )
-
-
-def _explode_strip_node(
-    node: Node,
-    strip: VirtualStrip,
-    kerf: float,
-) -> List[PlacedPartOut]:
-    """
-    VirtualStrip이 배치된 Node를 해체하여 개별 PlacedPartOut 목록 반환.
-
-    내부 부품들이 X축 방향으로 순차 배열되어 있음을 이용해
-    각 부품의 origin.x를 누적 계산한다.
-
-    좌표 계산:
-        current_x = node.origin.x   (Strip 전체 시작 X)
-        부품 i 배치 후: current_x += part_dims.l + kerf
-
-    Y축(W), Z축(T)은 Strip의 origin.y, origin.z를 모든 부품이 공유한다.
-    (VirtualStrip은 T/W가 동일한 부품들의 묶음이므로 Y·Z는 이동 없음)
-
-    cut_history는 Strip 노드의 절단 이력을 모든 내부 부품이 공유한다.
-    (물리적으로 동일한 절단 공정을 거쳤기 때문)
-    """
-    results: List[PlacedPartOut] = []
-
-    # Strip 전체의 시작 좌표
-    base_x = node.origin.x
-    base_y = node.origin.y
-    base_z = node.origin.z
-
-    # Strip 노드의 절단 이력 (모든 내부 부품이 공유)
-    shared_history = node.collect_cut_history()
-    cut_records = [
+def _make_cut_records(node: Node) -> List[CutRecordOut]:
+    return [
         CutRecordOut(
             cut_id=c.cut_id,
             axis=c.axis.value,
@@ -313,20 +207,22 @@ def _explode_strip_node(
             kerf=c.kerf,
             parent_node_id=c.parent_node_id,
         )
-        for c in shared_history
+        for c in node.collect_cut_history()
     ]
 
+def _explode_strip_node(node: Node, strip: VirtualStrip, kerf: float) -> List[PlacedPartOut]:
+    shared_cut_records = _make_cut_records(node)
+    base_x = node.origin.x
+    base_y = node.origin.y
+    base_z = node.origin.z
     current_x = base_x
-    part_seq = 0   # 스트립 내 순번 (node_id 고유성 보장용)
+    part_seq = 0
+    results: List[PlacedPartOut] = []
 
-    # internal_parts: [(Part, Dims, qty), ...] 길이 내림차순 정렬
     for p_obj, p_dims, qty in strip.internal_parts:
         for _ in range(qty):
-            # 고유 node_id 생성 (Strip 노드 ID + 순번)
-            synthetic_node_id = f"{node.node_id}_x{part_seq:03d}"
-
             results.append(PlacedPartOut(
-                node_id=synthetic_node_id,
+                node_id=f"{node.node_id}_x{part_seq:03d}",
                 stock_id=node.stock_id or "",
                 part_id=p_obj.id,
                 color=p_obj.color,
@@ -335,40 +231,43 @@ def _explode_strip_node(
                     volume=p_dims.volume,
                 ),
                 origin=OriginOut(x=current_x, y=base_y, z=base_z),
-                cut_history=cut_records,
+                cut_history=shared_cut_records,
                 depth=node.depth,
                 from_strip=True,
                 strip_id=strip.strip_id,
             ))
-
-            # 다음 부품 X 시작 위치 (부품 길이 + kerf)
             current_x += p_dims.l + kerf
             part_seq += 1
 
+    last_end_x = current_x - kerf
+    expected_end_x = base_x + strip.dims.l
+    if abs(last_end_x - expected_end_x) > 0.5:
+        import logging
+        logging.warning(
+            f"Strip {strip.strip_id} 끝점 불일치: "
+            f"계산={last_end_x:.2f} 기대={expected_end_x:.2f} "
+            f"diff={abs(last_end_x - expected_end_x):.2f}"
+        )
     return results
 
+def _node_to_placed_out(node: Node) -> PlacedPartOut:
+    dims = node.placed_part_dims
+    origin = node.origin
+    return PlacedPartOut(
+        node_id=node.node_id,
+        stock_id=node.stock_id or "",
+        part_id=node.placed_part.id,
+        color=node.placed_part.color,
+        placed_dims=DimsOut(l=dims.l, w=dims.w, t=dims.t, volume=dims.volume),
+        origin=OriginOut(x=origin.x, y=origin.y, z=origin.z),
+        cut_history=_make_cut_records(node),
+        depth=node.depth,
+        from_strip=False,
+        strip_id=None,
+    )
 
-def _build_placements(
-    result: "_phase4.Phase4Result",
-    kerf: float,
-) -> List[PlacedPartOut]:
-    """
-    Phase4Result.occupied_nodes를 순회하여 PlacedPartOut 목록 생성.
-
-    처리 분기:
-      - Strip 노드 (placed_part.id가 __strip__으로 시작):
-            _explode_strip_node()로 내부 부품 개별 해체
-      - 일반 노드:
-            기존 _node_to_placed_out() 사용
-
-    Returns:
-        모든 개별 부품의 PlacedPartOut 목록 (Strip 해체 포함)
-    """
-    # strip_id → VirtualStrip 빠른 조회용 맵
-    strip_map: Dict[str, VirtualStrip] = {
-        s.strip_id: s for s in result.strips
-    }
-
+def _build_placements(result: "_phase4.Phase4Result", kerf: float) -> List[PlacedPartOut]:
+    strip_map: Dict[str, VirtualStrip] = {s.strip_id: s for s in result.strips}
     placements: List[PlacedPartOut] = []
 
     for node in result.occupied_nodes:
@@ -377,87 +276,126 @@ def _build_placements(
             continue
 
         if StripAdapter.is_strip_part(placed):
-            # ── Strip 노드 해체 ──────────────────────────────────
             strip_id = StripAdapter.extract_strip_id(placed)
             strip = strip_map.get(strip_id)
             if strip is None:
-                # 맵에 없는 경우 방어: 원본 노드 그대로 출력
                 placements.append(_node_to_placed_out(node))
-                continue
-            placements.extend(_explode_strip_node(node, strip, kerf))
+            else:
+                placements.extend(_explode_strip_node(node, strip, kerf))
         else:
-            # ── 일반 노드 ────────────────────────────────────────
             placements.append(_node_to_placed_out(node))
-
     return placements
-
 
 def _build_stock_summaries_phase4(
     placements: List[PlacedPartOut],
+    result: "_phase4.Phase4Result",
     stocks: List[Stock],
 ) -> List[StockSummaryOut]:
-    """
-    해체된 PlacedPartOut 목록 기준으로 stock_summaries 집계.
-
-    Strip 해체 후 개별 부품 volume을 집계하므로
-    kerf 낭비가 제외된 실제 수율이 계산된다.
-
-    usable_volume: 해당 stock_id가 실제로 사용된 슬롯 수 × usable_dims.volume
-    (qty=2 원장 중 1장만 사용됐으면 1장 기준으로 집계)
-    """
-    # 배치 집계: stock_id → (placed_count, placed_volume)
-    counts:  Dict[str, int]   = {}
-    volumes: Dict[str, float] = {}
+    stocks_map: Dict[str, Stock] = {s.id: s for s in stocks}
+    counts: Dict[str, int] = defaultdict(int)
+    volumes: Dict[str, float] = defaultdict(float)
 
     for p in placements:
         sid = p.stock_id or "unknown"
-        counts[sid]  = counts.get(sid, 0) + 1
-        volumes[sid] = volumes.get(sid, 0.0) + p.placed_dims.volume
+        counts[sid] += 1
+        volumes[sid] += p.placed_dims.volume
+
+    strip_slot_counts: Counter = Counter(s.stock.id for s in result.eval_result.slots_used)
+    fallback_slot_counts: Dict[str, int] = {}
+    nodes_by_stock: Dict[str, List[Node]] = defaultdict(list)
+
+    for node in result.occupied_nodes:
+        if node.stock_id:
+            nodes_by_stock[node.stock_id].append(node)
+
+    for sid, nodes in nodes_by_stock.items():
+        stock = stocks_map.get(sid)
+        if stock is None:
+            continue
+        try:
+            usable_l = stock.usable_dims.l
+        except ValueError:
+            usable_l = stock.dims.l
+
+        max_slot_idx = max((int(n.origin.x // usable_l) for n in nodes)) if nodes else 0
+        fallback_slot_counts[sid] = max_slot_idx + 1
+
+    all_stock_ids = set(counts.keys())
+    slot_counts: Dict[str, int] = {}
+    for sid in all_stock_ids:
+        from_strip = strip_slot_counts.get(sid, 0)
+        from_fallback = fallback_slot_counts.get(sid, 1)
+        slot_counts[sid] = max(from_strip, from_fallback, 1)
 
     summaries: List[StockSummaryOut] = []
-    stocks_map = {s.id: s for s in stocks}
-
     for sid in counts:
         stock = stocks_map.get(sid)
         if stock is None:
             continue
 
-        orig   = stock.dims
-        usable = stock.usable_dims
+        orig = stock.dims
+        try:
+            usable = stock.usable_dims
+        except ValueError:
+            usable = orig
 
-        placed_vol = volumes.get(sid, 0.0)
-        # usable_volume: placed_vol을 담기 위해 실제로 열린 원장 슬롯 수 추정
-        # placed_vol / single_usable_vol을 올림하면 실제 사용 슬롯 수
-        single_usable = usable.volume
-        import math
-        slots_used = max(1, math.ceil(placed_vol / single_usable)) if single_usable > 0 else 1
-        usable_vol = single_usable * slots_used
-
+        n_slots = slot_counts.get(sid, 1)
+        placed_vol = volumes[sid]
+        usable_vol = usable.volume * n_slots
         eff = round((placed_vol / usable_vol * 100) if usable_vol > 0 else 0.0, 2)
 
         summaries.append(StockSummaryOut(
             stock_id=sid,
-            original_dims=DimsOut(l=orig.l,   w=orig.w,   t=orig.t,   volume=orig.volume),
-            usable_dims=DimsOut(  l=usable.l, w=usable.w, t=usable.t, volume=usable.volume),
+            original_dims=DimsOut(l=orig.l, w=orig.w, t=orig.t, volume=orig.volume),
+            usable_dims=DimsOut(l=usable.l, w=usable.w, t=usable.t, volume=usable.volume),
             placed_count=counts[sid],
             placed_volume=placed_vol,
             usable_volume=usable_vol,
             efficiency_pct=eff,
         ))
-
     return summaries
 
+def _collect_cuts_with_dims(occupied_nodes: List[Node]) -> Dict[str, tuple]:
+    cuts_map: Dict[str, tuple] = {}
+    for node in occupied_nodes:
+        ancestor = node
+        while ancestor is not None:
+            if ancestor.cut is not None and ancestor.cut.cut_id not in cuts_map:
+                cut = ancestor.cut
+                parent_dims = ancestor.parent.dims if ancestor.parent is not None else ancestor.dims
+                cuts_map[cut.cut_id] = (cut, parent_dims)
+            ancestor = ancestor.parent
+    return cuts_map
 
-# ─────────────────────────────────────────────
-# 동기 실행 래퍼 (ThreadPool에서 호출)
-# ─────────────────────────────────────────────
+def _cut_travel_mm(cut, parent_dims: Dims) -> float:
+    ax = cut.axis.value
+    if ax == "X":
+        return parent_dims.w
+    else:
+        return parent_dims.l
+
+def _estimate_work_time(
+    occupied_nodes: List[Node],
+    machine_speed_mm_per_sec: float,
+    setup_time_sec: float,
+) -> Dict[str, Any]:
+    cuts_map = _collect_cuts_with_dims(occupied_nodes)
+    setup_count = len(cuts_map)
+    total_travel = sum(_cut_travel_mm(c, d) for c, d in cuts_map.values())
+    pure_cut_time = round(total_travel / machine_speed_mm_per_sec if machine_speed_mm_per_sec > 0 else 0.0, 2)
+    total_time = round(pure_cut_time + setup_count * setup_time_sec, 2)
+
+    return {
+        "setup_count": setup_count,
+        "pure_cut_time_sec": pure_cut_time,
+        "total_estimated_time_sec": total_time,
+    }
 
 def _run_packing(
     engine_settings: EngineSettings,
     stocks: List[Stock],
     parts: List[Part],
 ) -> "_phase4.Phase4Result":
-    """Phase 4.0 엔진 호출 (30초 타임 버짓)"""
     return _phase4.pack_parts_phase4(
         settings=engine_settings,
         stocks=stocks,
@@ -465,63 +403,39 @@ def _run_packing(
         time_budget=_PHASE4_TIME_BUDGET,
     )
 
-
-# ─────────────────────────────────────────────
-# 라우터
-# ─────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "version": "4.0.0",
-        "engine": "Phase 4.0 Strip Engine",
+        "version": "4.1.0",
+        "engine": "Phase 4.1 Strip Engine",
     }
-
 
 @app.post("/optimize", response_model=OptimizeResponse)
 async def optimize(body: OptimizeRequest) -> OptimizeResponse:
     engine_settings = _build_engine_settings(body.settings)
-    stocks  = _build_stocks(body.stocks, body.settings.trimming)
-    parts   = _build_parts(body.parts)
-    kerf    = engine_settings.kerf
+    stocks = _build_stocks(body.stocks, body.settings.trimming)
+    parts = _build_parts(body.parts)
+    kerf = engine_settings.kerf
+    machine_speed_mm_per_sec = body.settings.machine_speed_mm_per_sec
+    setup_time_sec = body.settings.setup_time_sec
 
     try:
         result: _phase4.Phase4Result = await run_in_threadpool(
             functools.partial(_run_packing, engine_settings, stocks, parts)
         )
     except InvalidCutError as e:
-        raise HTTPException(status_code=400, detail={
-            "error": "물리 제약 위반",
-            "detail": str(e),
-            "error_code": "INVALID_CUT",
-        })
+        raise HTTPException(status_code=400, detail={"error": "물리 제약 위반", "detail": str(e), "error_code": "INVALID_CUT"})
     except CuttingError as e:
-        raise HTTPException(status_code=422, detail={
-            "error": "절단 엔진 오류",
-            "detail": str(e),
-            "error_code": "CUTTING_ERROR",
-        })
+        raise HTTPException(status_code=422, detail={"error": "절단 엔진 오류", "detail": str(e), "error_code": "CUTTING_ERROR"})
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={
-            "error": "입력값 오류",
-            "detail": str(e),
-            "error_code": "VALUE_ERROR",
-        })
+        raise HTTPException(status_code=400, detail={"error": "입력값 오류", "detail": str(e), "error_code": "VALUE_ERROR"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail={
-            "error": "서버 오류",
-            "detail": str(e),
-            "error_code": "INTERNAL_ERROR",
-        })
+        raise HTTPException(status_code=500, detail={"error": "서버 오류", "detail": str(e), "error_code": "INTERNAL_ERROR"})
 
-    # ── Strip 해체 포함 PlacedPartOut 생성 ──────────────────────────
     placements = _build_placements(result, kerf)
+    summaries = _build_stock_summaries_phase4(placements, result, stocks)
 
-    # ── stock_summaries (해체된 개별 부품 volume 기준 집계) ──────────
-    summaries = _build_stock_summaries_phase4(placements, stocks)
-
-    # ── 잔재(offcut) 데이터 ──────────────────────────────────────────
     offcuts = [
         OffcutOut(
             node_id=n.node_id,
@@ -532,55 +446,50 @@ async def optimize(body: OptimizeRequest) -> OptimizeResponse:
         for n in result.free_nodes
     ]
 
-    # ── 미배치 사유 ──────────────────────────────────────────────────
     failures = [
         f"부품 '{pid}' {qty}개를 배치하지 못했습니다. 원장 공간이 부족합니다."
         for pid, qty in result.unplaced.items()
     ]
 
-    # ── 통계 (Phase 4.0 확장) ────────────────────────────────────────
-    # total_placed_vol: 해체된 개별 부품 volume 합 (kerf 낭비 제외)
-    # total_usable_vol: 실제 사용된 원장 슬롯의 usable_volume 합
-    # overall_eff:      사용 원장 대비 실제 배치 부품 수율
-    # yield_rate_pct:   전체 투입 원장(qty 합산) 대비 배치 부품 수율
-    total_placed_vol = sum(s.placed_volume for s in summaries)
-    total_usable_vol = sum(s.usable_volume for s in summaries)   # 사용된 원장만
-
-    overall_eff = round(
-        (total_placed_vol / total_usable_vol * 100) if total_usable_vol > 0 else 0.0, 2
+    placed_vol = sum(s.placed_volume for s in summaries)
+    efficiency_vol = sum(s.usable_volume for s in summaries)
+    yield_vol = sum(
+        (s.usable_dims.volume if hasattr(s, 'usable_dims') else s.dims.volume) * s.qty
+        for s in stocks
     )
 
-    # yield_rate: 전체 원장(qty 포함) usable_volume 대비 실제 배치 vol
-    total_stock_usable = sum(s.usable_dims.volume * s.qty for s in stocks)
-    yield_rate_pct = round(
-        (total_placed_vol / total_stock_usable * 100) if total_stock_usable > 0 else 0.0, 2
-    )
+    overall_eff = round((placed_vol / efficiency_vol * 100) if efficiency_vol > 0 else 0.0, 2)
+    yield_rate_pct = round((placed_vol / yield_vol * 100) if yield_vol > 0 else 0.0, 2)
 
     s = result.stats
-    stats: Dict[str, Any] = {
-        # 기존 키 (프론트엔드 호환)
-        "total_placed":          len(placements),
-        "total_unplaced_types":  len(result.unplaced),
-        "total_placed_volume":   total_placed_vol,
-        "total_usable_volume":   total_usable_vol,
-        "overall_efficiency_pct": overall_eff,
-        "stocks_used":           result.stocks_used,
-        "processing_time_sec":   round(result.processing_time, 4),
+    time_est = _estimate_work_time(result.occupied_nodes, machine_speed_mm_per_sec, setup_time_sec)
 
-        # Phase 4.0 신규 키
-        "yield_rate_pct":        yield_rate_pct,
-        "n_strips":              s.n_strips,
-        "n_groups":              s.n_groups,
-        "strip_assigned":        s.n_assigned,
-        "strip_unassigned":      s.n_unassigned_strips,
-        "strip_assignment_rate": round(s.strip_assignment_rate * 100, 1),
-        "fallback_placed":       s.n_fallback_placed,
+    stats: Dict[str, Any] = {
+        "total_placed": len(placements),
+        "total_unplaced_types": len(result.unplaced),
+        "total_placed_volume": placed_vol,
+        "total_usable_volume": efficiency_vol,
+        "overall_efficiency_pct": overall_eff,
+        "stocks_used": result.stocks_used,
+        "processing_time_sec": round(result.processing_time, 4),
+        "yield_rate_pct": yield_rate_pct,
+        "n_groups": s.n_groups,
+        "n_strips": s.n_strips,
+        "strip_assigned": s.n_assigned,
+        "strip_unassigned": s.n_unassigned_strips,
+        "strip_assignment_rate": round(s.strip_assignment_rate * 100, 1) if hasattr(s, 'strip_assignment_rate') else 0.0,
+        "fallback_placed": s.n_fallback_placed,
         "step_times": {
-            "step1_dp_sec":      round(s.step1_sec, 4),
-            "step2_strip_sec":   round(s.step2_sec, 4),
-            "step3_assign_sec":  round(s.step3_sec, 4),
-            "step4_place_sec":   round(s.step4_sec, 4),
+            "step1_dp_sec": round(s.step1_sec, 4),
+            "step2_strip_sec": round(s.step2_sec, 4),
+            "step3_assign_sec": round(s.step3_sec, 4),
+            "step4_place_sec": round(s.step4_sec, 4),
         },
+        "setup_count": time_est["setup_count"],
+        "pure_cut_time_sec": time_est["pure_cut_time_sec"],
+        "total_estimated_time_sec": time_est["total_estimated_time_sec"],
+        "machine_speed_mm_per_sec": machine_speed_mm_per_sec,
+        "setup_time_sec": setup_time_sec,
     }
 
     return OptimizeResponse(
