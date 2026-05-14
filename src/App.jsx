@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Html, Line } from "@react-three/drei";
 import * as THREE from "three";
 
-const API_URL = "https://cutting-ver-2.onrender.com";
+const API_URL = "https://cutting-ver-3-1.onrender.com";
 const SCALE = 0.001;
 const STOCK_GAP = 0.5;
 const CAM_X_OFFSET = -0.73;
